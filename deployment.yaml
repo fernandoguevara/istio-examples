@@ -1,0 +1,225 @@
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: notes-gateway
+spec:
+  selector:
+    istio: ingressgateway # use istio default ingress gateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*"
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: notes
+spec:
+  hosts:
+  - "*"
+  gateways:
+  - notes-gateway
+  http:
+  - name: "notes-v2-routes"
+    match:
+    - uri:
+        prefix: "/newnotes"
+    rewrite:
+      uri: "/notes"
+    route:
+    - destination:
+        host: notes
+        subset: v2
+  - name: "notes-v1-route"
+    route:
+    - destination:
+        host: notes
+        subset: v1
+    mirror:
+      host: notes
+      subset: v2
+    mirrorPercentage:
+      value: 100.0
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: DestinationRule
+metadata:
+  name: notes
+spec:
+  host: notes
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+  - name: v2
+    labels:
+      version: v2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes
+  labels:
+    app: notes
+    service: notes
+spec:
+  ports:
+  - port: 8080
+    name: http
+  selector:
+    app: notes
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-v1
+  labels:
+    app: notes
+    version: v1
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: notes
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: notes
+        version: v1
+    spec:
+      containers:
+      - name: notes
+        image: fexsor/notes:v1
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        securityContext:
+          runAsUser: 1000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notes-v2
+  labels:
+    app: notes
+    version: v2
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: notes
+      version: v2
+  template:
+    metadata:
+      labels:
+        app: notes
+        version: v2
+    spec:
+      containers:
+      - name: notes
+        image: fexsor/notes:v2
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        securityContext:
+          runAsUser: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app: keycloak
+    service: keycloak
+spec:
+  ports:
+  - port: 8080
+    name: http
+  selector:
+    app: keycloak
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: keycloak
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - name: keycloak
+        image: jboss/keycloak
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8080
+        securityContext:
+          runAsUser: 1000
+        env:
+        - name: KEYCLOAK_USER
+          value: "admin"
+        - name: KEYCLOAK_PASSWORD
+          value: "admin"
+---
+apiVersion: security.istio.io/v1beta1
+kind: RequestAuthentication
+metadata:
+  name: jwt-example
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: notes
+  jwtRules:
+  - issuer: "http://keycloak.keycloak:8080/auth/realms/demo"
+    jwksUri: "http://keycloak.keycloak:8080/auth/realms/demo/protocol/openid-connect/certs"
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: require-jwt
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app: notes
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+       requestPrincipals: ["http://keycloak.keycloak:8080/auth/realms/demo/60989318-7139-43ce-9bba-373ed250efdb"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/notes/admin*"]
+    when:  
+    - key: request.auth.claims[roles]
+      values: ["admin"]
+  - from:
+    - source:
+       requestPrincipals: ["http://keycloak.keycloak:8080/auth/realms/demo/60989318-7139-43ce-9bba-373ed250efdb"]
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/notes/user*"]
+    when:  
+    - key: request.auth.claims[roles]
+      values: ["user", "admin"]
+  - from:
+    to:
+    - operation:
+        methods: ["GET"]
+        paths: ["/notes"]
